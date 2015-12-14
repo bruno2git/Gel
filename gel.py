@@ -23,7 +23,7 @@ from scipy.optimize import leastsq, fsolve
 from scipy import stats
 from matplotlib import pyplot as plt, cm
 from matplotlib.ticker import FixedLocator
-from mpldatacursor import datacursor, HighlightingDataCursor
+from mpldatacursor import datacursor, HighlightingDataCursor  # version 0.5.0
 from pint import UnitRegistry, DimensionalityError
 
 import pydna
@@ -54,30 +54,27 @@ ladders = {
     '1kb_GeneRuler': {
         'sizes': Q_([10000, 8000, 6000, 5000, 4000, 3500, 3000, 2500, 2000,
                      1500, 1000, 750, 500, 250], 'bp'),
-        'masses': Q_([30, 30, 70, 30, 30, 30, 70, 25, 25, 25, 60, 25, 25, 25],
-                     'ng'),
-        'total mass': Q_(0.5, 'ug')
+        'percent': Q_([0.06, 0.06, 0.14, 0.06, 0.06, 0.06, 0.14, 0.05, 0.05,
+                       0.05, 0.12, 0.05, 0.05, 0.05])
         },
     '1kb+_GeneRuler': {
         'sizes': Q_([20000, 10000, 7000, 5000, 4000, 3000, 2000, 1500, 1000,
                      700, 500, 400, 300, 200, 75], 'bp'),
-        'masses': Q_([20, 20, 20, 75, 20, 20, 20, 80, 25, 25, 75, 25, 25, 25,
-                      25], 'ng'),
-        'total mass': Q_(0.5, 'ug')
+        'percent': Q_([0.04, 0.04, 0.04, 0.15, 0.04, 0.04, 0.04, 0.16, 0.05,
+                       0.05, 0.15, 0.05, 0.05, 0.05, 0.05])
         },
     'Mix_GeneRuler': {
         'sizes': Q_([10000, 8000, 6000, 5000, 4000, 3500, 3000, 2500, 2000,
                      1500, 1200, 1000, 900, 800, 700, 600, 500, 400, 300, 200,
                      100], 'bp'),
-        'masses': Q_([18, 18, 18, 18, 18, 18, 60, 16, 16, 16, 16, 60, 17, 17,
-                      17, 17, 60, 20, 20, 20, 20], 'ng'),
-        'total mass': Q_(0.5, 'ug')
+        'percent': Q_([0.036, 0.036, 0.036, 0.036, 0.036, 0.036, 0.12, 0.032,
+                       0.032, 0.032, 0.032, 0.12, 0.034, 0.034, 0.034, 0.034,
+                       0.12, 0.04, 0.04, 0.04, 0.04])
         },
     'High_Range_GeneRuler': {
         'sizes': Q_([48502, 24508, 20555, 17000, 15258, 13825, 12119, 10171],
                     'bp'),
-        'masses': Q_([80, 88, 80, 59, 59, 50, 47, 37], 'ng'),
-        'total mass': Q_(0.5, 'ug')
+        'percent': Q_([0.16, 0.176, 0.16, 0.118, 0.118, 0.1, 0.094, 0.074])
         }
     }
 
@@ -363,14 +360,29 @@ def gen_ladder(sizes, quantities, vol=Q_(12,'ul')):
     frags = randDNAseqs(to_units(sizes, 'bp').magnitude)
     return Sample(frags, quantities, vol)
 
-def ladder_from_info(key, vol=Q_(12,'ul')):
+def ladder_from_info(key, qty=Q_(500,'ng'), vol=Q_(12,'ul')):
+    assert key in ladders, "Key not recognized. Choose from: %s" %ladders.keys()
+    qty = to_units(qty, Vars['quantities']['units'], var_name='qty')
+    vol = to_units(vol, Vars['volume']['units'], var_name='vol')
     sizes = ladders[key]['sizes']
-    quantities = ladders[key]['masses']
+    fracs = ladders[key]['percent']
+    quantities = qty*fracs
     return gen_ladder(sizes, quantities, vol)
 
 def logspace_int(minimum, maximum, divs):
     space = np.logspace(np.log10(minimum), np.log10(maximum), divs)
     return np.array([int(round(val, 0)) for val in space])
+
+def flatten(List):
+    if List == []: return List
+    flatL = []
+    for elem in List:
+        if not isinstance(elem, Q_) and hasattr(elem, '__iter__'):
+            flatE = flatten(elem)
+            [flatL.append(E) for E in flatE]
+        else:
+            flatL.append(elem)
+    return flatL
 
 # Gaussian function
 Gaussian = lambda x, hgt, ctr, dev: hgt*np.exp(-(x-ctr)**2/(2*dev**2))
@@ -388,7 +400,9 @@ def _to_units(quantity, units, var_name=None):
     if isinstance(quantity, Q_):
         try:
             quantity = quantity.to(units)
-        except DimensionalityError as error:
+        except TypeError as error:
+            quantity = [q.to(units) for q in quantity]
+        except Exception as error:
             if var_name: error.extra_msg = " for variable '%s'" %var_name
             raise error
     else: quantity = Q_(quantity, units)
@@ -401,7 +415,7 @@ def to_units(quantity, units, var_name=None):
     pint.unit.Quantity or assigns the default units if it's not.
     '''
     if (not isinstance(quantity, Q_) and hasattr(quantity, '__iter__') and
-        len(quantity) > 0 and sum([isinstance(q, Q_) for q in quantity]) > 0):
+        len(quantity) > 0 and sum([isinstance(q, Q_) for q in flatten(quantity)]) > 0):
         temp_qty = [to_units(q, units, var_name) for q in quantity]
         quantity = Q_([q.magnitude for q in temp_qty], units)
     else:
@@ -430,19 +444,30 @@ def assign_quantities(samples, quantities, maxdef=Q_(150,'ng')):
     corresponding quantity assuming a linear relationship between the DNA
     length (in basepairs) and its mass. As if the fragments originated in
     a restriction procedure.
-    For each sample takes the maximum quantity (either from the previous
-    samples or from the default) and assigns it to the fragment with greater
-    length.
+    For each sample takes the maximum quantity (either from the other samples
+    or from the default) and assigns it to the fragment with greater length.
     '''
     outQs = []
     units = Vars['quantities']['units']
     maxQ = Q_(0, units)
     # Preprocessing
     if quantities is None: quantities = []
+    if isinstance(quantities, Q_):
+        if isinstance(quantities.magnitude, Number):
+            quantities = Q_([quantities.magnitude for i in
+                             xrange(len(samples))], quantities.units)
+        else:
+            for i, qty in enumerate(quantities.magnitude):
+                if qty is None:
+                    quantities.magnitude[i] = []
+    else:
+        if isinstance(quantities, Number):
+            quantities = [quantities for i in xrange(len(samples))]
+        elif hasattr(quantities, '__iter__'):
+            for i, qty in enumerate(quantities):
+                if qty is None:
+                    quantities[i] = []
     quantities = to_units(quantities, units, 'quantities')
-    if isinstance(quantities.magnitude, Number):
-        quantities = Q_([quantities.magnitude for i in xrange(len(samples))],
-                        quantities.units)
     # Quantity assignment - straightforward cases
     for i in xrange(len(samples)):
         if i < len(quantities) and isinstance(quantities[i].magnitude, Number):
@@ -469,6 +494,50 @@ def assign_quantities(samples, quantities, maxdef=Q_(150,'ng')):
             maxL = max(sizes)
             outQs[i] = Q_([size*maxQ/maxL for size in sizes], units)
     return outQs
+
+
+def assign_quantitiesB(samples, maxdef=Q_(150,'ng')):
+    '''
+    Assigns quantities (masses in nanograms) to the DNA fragments without
+    corresponding quantity assuming a linear relationship between the DNA
+    length (in basepairs) and its mass. As if the fragments originated in
+    a restriction procedure.
+    For each sample takes the maximum quantity (either from the other samples
+    or from the default) and assigns it to the fragment with greater length.
+    '''
+    quantities = []
+    units = Vars['quantities']['units']
+    maxQ = Q_(0, units)
+    # Preprocessing and straightforward cases
+    for sample in samples:
+        sample_qts = []
+        for qty in sample.quantities:
+            if not np.isnan(qty.magnitude) and qty.magnitude is not None:
+                sample_qts.append(qty)
+                if qty > maxQ: maxQ = qty
+        quantities.append(sample_qts)
+    # Quantity assignment - missing values
+    if maxQ.magnitude == 0: maxQ = to_units(maxdef, units, 'maxdef')
+    maxQ = maxQ.magnitude
+    for i, sample in enumerate(samples):
+        if quantities[i] == []:
+            # Linearly extrapolates each DNA fragment's quantity taking as
+            # reference the maximum quantity registered (or the default)
+            sizes = [len(dna) for dna in sample.solutes]
+            maxL = max(sizes)
+            quantities[i] = [size*maxQ/maxL for size in sizes]
+    quantities = to_units(quantities, units, 'quantities')
+    return quantities
+
+
+def lindivQ(sample, quantity, criteria=len):
+    """
+    Linearly divides a quantity by the elements of sample considering a
+    criteria. Criteria must by a function that returns a number upon being
+    applied to each element of sample.
+    """
+    sizes = [criteria(dna) for dna in sample]
+    return [size*quantity/sum(sizes) for size in sizes]
 
 
 def size_to_mobility(dna_len, field, percentage,
@@ -610,7 +679,8 @@ def ferguson_to_mu0(field, Tvals, DNAvals, dataset, mu_func,
 
 def gelplot_imshow(distances, bandwidths, intensities, lanes, names,
                    gel_len, wellx, welly, wellsep, res, cursor_ovr,
-                   back_col, band_col, well_col, noise, Itol, title, FWTM):
+                   back_col, band_col, well_col, noise, Itol, title,
+                   FWTM, show=True):
     """
     At some point this will have a description...
     """
@@ -752,7 +822,8 @@ def gelplot_imshow(distances, bandwidths, intensities, lanes, names,
     if cursor_args['hover'] == True: cursor_args['display'] = 'single'
     datacursor(bands, **cursor_args)
     #fig.savefig('example.png', dpi=300)
-    plt.show()
+    if show: plt.show()
+    return plt
 
 
 
@@ -769,10 +840,10 @@ class Sample:
 
     def __init__(self,
                  solutes = [],
-                 quantities = Q_([],'ng'),
-                 volume = Q_(10,'ul'),
+                 quantities = Q_([], 'ng'),
+                 volume = Q_(10, 'ul'),
                  endless = False):
-        assert len(solutes) == len(quantities), "len(solutes) != len(quantities)"
+        #assert len(solutes) == len(quantities), "len(solutes) != len(quantities)"
         quantities = (quantities if isinstance(quantities, Q_) else
                       to_units(quantities, Vars['quantities']['units']))
         assert quantities.dimensionality == Q_(1, 'g').dimensionality or \
@@ -782,6 +853,11 @@ class Sample:
                   to_units(volume, Vars['volume']['units']))
         assert volume.dimensionality == Q_(1, 'L').dimensionality, (
             "Dimension of <volume> must be [length]**3")
+        qty_list = quantities.tolist()
+        for i, sol in enumerate(solutes):
+            if i >= len(qty_list):
+                qty_list.append(np.nan)
+        quantities = to_units(qty_list, quantities.units, 'quantities')
         self.volume = volume
         self.endless = endless
         if len(solutes) > 0:
@@ -835,7 +911,7 @@ class Sample:
         lC = len(max(Cstr, key=len))
         Cstr = [s.rjust(lC) for s in Cstr]
         prop = [q/sum(self.quantities)*100 for q in self.quantities]
-        Pstr = [str(p.magnitude) for p in prop]
+        Pstr = [str(round(p.magnitude, 1)) for p in prop]
         Pstr.insert(0, "%  ")
         lP = len(max(Pstr, key=len))
         Pstr = [s.rjust(lP) for s in Pstr]
@@ -916,6 +992,10 @@ class Sample:
             samples = [self.aliquot(v, endless) for i in xrange(k-1)]
             samples.append(self.aliquot(self.volume, endless))
             return samples
+
+    def total_qty(self):
+        """Return sum of quantities."""
+        return sum(self.quantities)
 
     def add_solute(self, solute, quantity):
         """Add a quantity of solute to the sample."""
@@ -1008,14 +1088,12 @@ class Sample:
 class Gel:
     '''
     At some point this will have a description...
+    Notes:
     '''
 
     def __init__(self,
-                 samples,  #(samples_list ?)                     # [Group in
-                 lanenames = None,                               #  sample obj]
-                 volumes = Q_(12,'ul'), # microliter             # #### ??? ###
-                 quantities = [],       # ng (~20 ng to ~200 ng) # #### ??? ###
-                 ladder = None,         # Sample object
+                 samples,
+                 names = None,
                  percentgel = Q_(1.0,'(g/(100 mL))*100'),  # grams agarose/100 mL buffer * 100
                  electrfield = Q_(5.0, 'V/cm'),
                  temperature = Q_(295.15,'K'),
@@ -1025,14 +1103,14 @@ class Gel:
                  wellz = Q_(1,'mm'),   # mm   ######################### ??? ###
                  wellsep = Q_(2,'mm')  # mm
                  ):
-        self.lanes = samples  # assumes len(DNA) in bp                        #
-        self.names = lanenames if lanenames else ['lane'+str(i) for i in      #
-                                                  xrange(1, len(samples)+1)]  #
-        if volumes is not None:
-            volumes = to_units(volumes, 'uL', 'volumes')                      #
-            if not hasattr(volumes.magnitude, '__iter__'):
-                volumes = np.repeat(volumes, len(self.lanes))
-        self.volumes = volumes
+        """
+        default volume = 0.85 * well Volume
+        default max quantity per band = 150 ng
+        """
+        
+        self.samples = samples  # assumes len(DNA) in bp                        #
+        self.names = names if names else ['lane'+str(i) for i in      #
+                                          xrange(1, len(samples)+1)]  #
         self.percent = to_units(percentgel, '(g/(100 mL))*100', 'percentgel') # agarose percentage
         self.field = to_units(electrfield, 'V/cm', 'electrfield')  # electric field intensity
         self.temperature = to_units(temperature, 'K', 'temperature')  # absolute temperature
@@ -1042,17 +1120,22 @@ class Gel:
         self.wellz = (to_units(wellz, 'mm', 'wellz') if wellz is not None
                       else wellz)  # well depth
         self.wellsep = to_units(wellsep, 'mm', 'wellsep')  # separation between wells
-        if ladder is not None:
-            if type(ladder) is str:
-                ladder = ladder_from_info(ladder)
-            self.lanes.insert(0, ladder.solutes)
-            self.names.insert(0, '')
-            quantities.insert(0, ladder.quantities)
-            if self.volumes is not None:
-                volumes = self.volumes.tolist()
-                volumes.insert(0, ladder.volume)
-                self.volumes = to_units(volumes, self.volumes.units)
-        self.quantities = assign_quantities(self.lanes, quantities, Q_(150,'ng'))
+        # Volumes
+        wellVol = self.wellx * self.welly * self.wellz
+        wellVol.ito('ul')
+        defaulVol = 0.85 * wellVol
+        volumes = []
+        for sample in self.samples:
+            vol = sample.volume
+            if not np.isnan(vol) and vol is not None:
+                volumes.append(vol)
+            else:
+                volumes.append(defaulVol)
+        self.volumes = to_units(volumes, 'uL', 'volumes')
+        # Quantities
+        defaulQty = Q_(150,'ng')
+        self.quantities = assign_quantitiesB(self.samples, defaulQty)
+        #self.quantities = assign_quantities(self.samples, quantities, defaulQty)
         self.runtime = np.nan                                        ##########
         self.freesol_mob = None
         self.mobilities = []
@@ -1123,25 +1206,25 @@ class Gel:
             till_len = 0.75,         # percent of gel_len
             till_time = None,        # hours
             exposure = 0.5,          # [0-1]
-            bandwidth = 2,           # [0,1,2]
-            method = 'linear',       # 'cubic','nearest'
-            dset_name = 'vertical',  # 'horizontal'
-            replNANs = True,         # replace NANs by 'nearest' interpolation
+            geometry = 'horizontal',
             plot = True,
-            res = Q_(500,'px/in'),  # pixels/inch
+            res = Q_(500,'px/in'),
             cursor_ovr = dict(hover=False),
             back_col = 0.3,
             band_col = 1,
             well_col = 0.05,
             noise = 0.015,
-            Itol = 1E-5,
-            geometry = 'horizontal',
-            FWTM = False
+            interpol = 'linear',     # 'cubic','nearest'
+            dset_name = 'vertical',  # 'horizontal'
+            replNANs = True          # replace NANs by 'nearest' interpolation
             ):
         '''
         At some point this will have a description...
         '''
-        lanes = self.lanes
+        bandwidth = 2  # {0:'well_only', 1:'intrinsic_only', 2:'both'}
+        Itol = 1E-5    # intensity tolerance
+        FWTM = False   # bandwidth interpreted as FWTM instead of FWHM
+        lanes = [sample.solutes for sample in self.samples]
         names = self.names
         field = self.field              # V/cm
         percentage = self.percent       # %agarose
@@ -1194,7 +1277,8 @@ class Gel:
             for dna_frag in lane:
                 dna_size = len(dna_frag) * ureg.bp # bp assumption ###### ! ###
                 frag_mob = size_to_mobility(dna_size, field, percentage,
-                                            mu_func, dataset, method, replNANs)
+                                            mu_func, dataset, interpol,
+                                            replNANs)
                 lane_mobs.append(frag_mob)
             self.mobilities.append(lane_mobs * ureg('cm**2/V/s'))  ############
         #self.mobilities = Q_(self.mobilities, 'cm**2/V/s')
@@ -1203,7 +1287,7 @@ class Gel:
 
         # vWBR eq. parameters muL, muS, gamma
         output = vWBRfit(field, percentage, DNAspace_vWBRfit, dataset, mu_func,
-                         method, replNANs, plot=False)
+                         interpol, replNANs, plot=False)
         muS, muL, gamma = output[0]
         muS = Q_(muS, 'cm**2/V/s')                                            #
         muL = Q_(muL, 'cm**2/V/s')                                            #
@@ -1228,7 +1312,7 @@ class Gel:
         
         # Free solution mobility estimate
         mu0 = ferguson_to_mu0(field, Tvals, DNAspace_mu0, dataset, mu_func,
-                              method, replNANs, plot=False)
+                              interpol, replNANs, plot=False)
         mu0 = Q_(mu0,'cm**2/V/s')  ############################################
         self.freesol_mob = mu0
         
@@ -1355,10 +1439,12 @@ class Gel:
                                      hours.magnitude, mins.magnitude,
                                      exposure))
             # Plot
-            gelplot_imshow(distances, bandwidths, intensities, lanes, names,
-                           gel_len, wellx, welly, wellsep,
-                           res, cursor_ovr, back_col, band_col, well_col,
-                           noise, Itol, title, FWTM)
+            gelpic = gelplot_imshow(distances, bandwidths, intensities, lanes,
+                                    names, gel_len, wellx, welly, wellsep, res,
+                                    cursor_ovr, back_col, band_col, well_col,
+                                    noise, Itol, title, FWTM, False)
+            return gelpic
+        return None
 
 
 
@@ -1398,13 +1484,10 @@ if __name__=="__main__":
     # Exposure factor
     exposure = 0.4
 
-    # Bandwidth
-    bandwidth = 2  # [0,1,2]
-
     # Dataset and interpolation
     dset_name = 'vertical'
     dataset = datasets[dset_name]
-    method  = 'linear'
+    interpol  = 'linear'
     replNANs = True
 
     # Plot
@@ -1415,31 +1498,18 @@ if __name__=="__main__":
     band_col = 1
     well_col = 0.05
     noise = 0.5*0.023400015217741609  # 0.015
-    Itol = 1E-5
-    FWTM = False
 
     # Lane identifiers
-    lanenames=['L1', 'S1', 'S2']#, 'R1']
+    lanenames=['L1', 'S1', 'S2']
 
-    # Ladder sizes
-    ladder_name = '1kb_GeneRuler'
-    #sizes = [250, 500, 750, 1000, 1500, 2000, 2500, 3000, 3500, 4000, 5000,
-    #          6000, 8000, 10000]
-    
-    # Lanes
-    #lane1 = randDNAseqs(sizes)
-    lane2 = randDNAseqs([561,1302,135,5021])
-    lane3 = randDNAseqs([3000, 500, 1500])
-    # random lane
-    ##lane4 = randDNAseqs([randint(min(sizes), max(sizes))
-    ##                     for r in range(randint(3,10))])
-    # List of lanes
-    samples = [lane2, lane3]#, lane4]
+    # Samples
+    ladder = ladder_from_info('1kb_GeneRuler')
+    sample1 = Sample(randDNAseqs([561, 1302, 135, 5021]))
+    sample2 = Sample(randDNAseqs([3000, 500, 1500]))
+    samples = [ladder, sample1, sample2]
 
     # Volumes and Quantities
     volumes = 12  # microliter
-    ##quantities = [[100 for j in xrange(len(samples[i]))]
-    ##              for i in xrange(len(samples))]
 
     quantities = []
     #quantities.append([25, 25, 25, 60, 25, 25, 25, 70, 30, 30, 30, 70, 30, 30])
@@ -1468,18 +1538,16 @@ if __name__=="__main__":
 
     if test_gel:
         ### Instantiate Gel ###
-        G = Gel(samples=samples, lanenames=lanenames,
-                volumes=volumes, quantities=quantities, ladder=ladder_name,
-                percentgel=percentgel, electrfield=electrfield,
-                temperature=temperature, gel_len=gel_len,
-                wellx=wellx, welly=welly, wellz=wellz, wellsep=wellsep)
+        G = Gel(samples, lanenames, percentgel, electrfield, temperature,
+                gel_len, wellx, welly, wellz, wellsep)
 
         ### Run Gel ###
-        G.run(till_len=till_len, till_time=till_time, exposure=exposure,
-              bandwidth=bandwidth, method=method, dset_name=dset_name,
-              replNANs=replNANs, plot=plot, res=res, cursor_ovr=cursor_ovr,
-              back_col=back_col, band_col=band_col, well_col=well_col,
-              noise=noise, Itol=Itol, geometry=geometry, FWTM=FWTM)
+        pic = G.run(till_len, till_time, exposure, geometry, plot, res,
+                    cursor_ovr, back_col, band_col, well_col, noise,
+                    interpol, dset_name, replNANs)
+        if plot:
+            pic.savefig('gelplot.jpg', dpi=300)
+            pic.show()
 
 
     if test_mu0:
@@ -1490,7 +1558,7 @@ if __name__=="__main__":
         plot = True
         for Ei in E_space:
             mu0 = ferguson_to_mu0(Ei, T_space, DNAspace, dataset,
-                                  mu_funcs[dset_name], method, replNANs, plot)
+                                  mu_funcs[dset_name], interpol, replNANs, plot)
             if mu0 is None: print mu0
             else: print 'mu0= %.3e cm^2/(V.seg)' %mu0
 
@@ -1504,7 +1572,7 @@ if __name__=="__main__":
         plot = True
         output = vWBRfit(electrfield, percentgel, DNAvals,
                          datasets[dset_name], mu_funcs[dset_name],
-                         method, replNANs, plot)
+                         interpol, replNANs, plot)
         #print output
 
 
@@ -1519,7 +1587,7 @@ if __name__=="__main__":
                 output = vWBRfit(Ei, Ti, DNAvals,
                                  dataset=datasets[dset_name],
                                  mu_func=mu_funcs[dset_name],
-                                 method=method, replNANs=replNANs, plot=plot)
+                                 method=interpol, replNANs=replNANs, plot=plot)
 
 
     if test_samples:
@@ -1527,9 +1595,13 @@ if __name__=="__main__":
         print '\n'+80*'#'
         print '( Sample Class Demonstration )'.center(80, '#')
         print 80*'#'+'\n'
-        s1 = Sample(G.lanes[2], G.quantities[2], 20)
-        s2 = Sample(['dna1','dna2','dna3'], G.quantities[2], 20)
-        s3 = Sample(G.lanes[0], G.quantities[0])
+        dseqs1 = randDNAseqs([500, 1000, 5000])
+        qts1 = lindivQ(dseqs1, 200)
+        dseqs2 = randDNAseqs([3000, 1500])
+        qts2 = lindivQ(dseqs2, 150)
+        s1 = Sample(dseqs1, qts1, 20)
+        s2 = Sample(['dna1','dna2','dna3'], qts1, 20)
+        s3 = Sample(dseqs2, qts2)
         s4 = Sample()
         print ' Sample representation '.center(80, '#')
         print repr(s1)
@@ -1613,7 +1685,7 @@ if __name__=="__main__":
         s1d.add_solute(sol, solQ)
         print s1d
         s1d = s1.duplicate()
-        sol = s3.solutes[9]
+        sol = s3.solutes[0]
         solQ = Q_(10, 'ng')
         print s1d
         s1d.add_solute(sol, solQ)
@@ -1626,15 +1698,16 @@ if __name__=="__main__":
         print 80*'#'
         for k in ladders:
             sizes = ladders[k]['sizes']
-            masses = ladders[k]['masses']
-            total = ladders[k]['total mass']
-            assert len(sizes) == len(masses), 'ladder: %s, len(sizes) != len(masses)' %k
-            assert sum(masses) == total, 'ladder: %s, sum(masses) != total mass' %k
+            fracs = ladders[k]['percent']
+            total = Q_(0.5, 'ug')
+            masses = total * fracs
+            assert len(sizes) == len(fracs), 'ladder: %s, len(sizes) != len(percent)' %k
+            assert round(sum(fracs), 5) == 1, 'ladder: %s, sum(percent) != 1' %k
             print '\n', k, '\n', '-'*80
             print 'size \t\t mass/%s \t fraction' % total
             print '-'*80
             for i in xrange(len(sizes)):
-                print sizes[i], '  \t ', masses[i], ' \t ', masses[i]/sum(masses)
+                print sizes[i], '  \t ', masses[i], ' \t ', fracs[i]
             print '-'*80
 
     if test_gen_ladder:
@@ -1642,7 +1715,18 @@ if __name__=="__main__":
         print '\n'+80*'#'
         print '( Sample From DNA Ladder Info )'.center(80, '#')
         print 80*'#'+'\n'
-        print ladder_from_info('1kb_GeneRuler')
+        print "ladder_from_info('1kb_GeneRuler')"
+        l1 = ladder_from_info('1kb_GeneRuler')
+        print repr(l1)
+        print l1
+        print "\nladder_from_info('1kb_GeneRuler', 1000)"
+        l2 = ladder_from_info('1kb_GeneRuler', 1000)
+        print repr(l2)
+        print l2
+        print "\nladder_from_info('1kb_GeneRuler', 1000, 24)"
+        l3 = ladder_from_info('1kb_GeneRuler', 1000, 24)
+        print repr(l3)
+        print l3
         
 
 
